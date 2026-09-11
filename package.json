@@ -1,0 +1,217 @@
+{
+  "name": "fixed-width-query",
+  "displayName": "Fixed-Width Query",
+  "description": "Open, navigate and query multi-gigabyte fixed-width and pattern-delimited text files without loading them into memory.",
+  "version": "0.1.0",
+  "publisher": "samueleradici",
+  "license": "MIT",
+  "author": "Samuele Radici (kio)",
+  "engines": {
+    "vscode": "^1.85.0",
+    "node": ">=18"
+  },
+  "categories": [
+    "Visualization",
+    "Data Science",
+    "Other"
+  ],
+  "keywords": [
+    "fixed-width",
+    "flat file",
+    "mainframe",
+    "copybook",
+    "large files"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Schema profiles are read from the workspace but never executed."
+    },
+    "virtualWorkspaces": {
+      "supported": false,
+      "description": "Requires positional file-system reads, available only on local files."
+    }
+  },
+  "contributes": {
+    "customEditors": [
+      {
+        "viewType": "fixedWidthQuery.editor",
+        "displayName": "Fixed-Width Query",
+        "selector": [
+          {
+            "filenamePattern": "*.dat"
+          },
+          {
+            "filenamePattern": "*.fw"
+          },
+          {
+            "filenamePattern": "*.fwd"
+          },
+          {
+            "filenamePattern": "*.rpt"
+          },
+          {
+            "filenamePattern": "*.txt"
+          },
+          {
+            "filenamePattern": "*.log"
+          }
+        ],
+        "priority": "option"
+      }
+    ],
+    "commands": [
+      {
+        "command": "fixedWidthQuery.openWith",
+        "title": "Open in Fixed-Width Query",
+        "category": "Fixed-Width Query"
+      },
+      {
+        "command": "fixedWidthQuery.focusQueryBar",
+        "title": "Focus Query Bar",
+        "category": "Fixed-Width Query"
+      },
+      {
+        "command": "fixedWidthQuery.toggleRuler",
+        "title": "Toggle Column Ruler",
+        "category": "Fixed-Width Query"
+      },
+      {
+        "command": "fixedWidthQuery.goToRow",
+        "title": "Go to Row...",
+        "category": "Fixed-Width Query"
+      },
+      {
+        "command": "fixedWidthQuery.exportResult",
+        "title": "Export Current Result...",
+        "category": "Fixed-Width Query"
+      },
+      {
+        "command": "fixedWidthQuery.saveSchema",
+        "title": "Save Schema Profile (.fwq.json)",
+        "category": "Fixed-Width Query"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "fixedWidthQuery.openWith",
+          "group": "navigation@30",
+          "when": "!explorerResourceIsFolder"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "fixedWidthQuery.focusQueryBar",
+          "when": "fixedWidthQuery.editorFocused"
+        },
+        {
+          "command": "fixedWidthQuery.toggleRuler",
+          "when": "fixedWidthQuery.editorFocused"
+        },
+        {
+          "command": "fixedWidthQuery.goToRow",
+          "when": "fixedWidthQuery.editorFocused"
+        },
+        {
+          "command": "fixedWidthQuery.exportResult",
+          "when": "fixedWidthQuery.editorFocused"
+        },
+        {
+          "command": "fixedWidthQuery.saveSchema",
+          "when": "fixedWidthQuery.editorFocused"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "fixedWidthQuery.focusQueryBar",
+        "key": "ctrl+shift+f",
+        "mac": "cmd+shift+f",
+        "when": "fixedWidthQuery.editorFocused"
+      },
+      {
+        "command": "fixedWidthQuery.goToRow",
+        "key": "ctrl+g",
+        "mac": "cmd+g",
+        "when": "fixedWidthQuery.editorFocused"
+      }
+    ],
+    "configuration": {
+      "title": "Fixed-Width Query",
+      "properties": {
+        "fixedWidthQuery.pageSizeBytes": {
+          "type": "number",
+          "default": 1048576,
+          "minimum": 65536,
+          "maximum": 8388608,
+          "description": "Size of a single page read from disk. Must be a power of two."
+        },
+        "fixedWidthQuery.pageCacheBytes": {
+          "type": "number",
+          "default": 67108864,
+          "minimum": 8388608,
+          "maximum": 268435456,
+          "description": "Hard ceiling for the raw page cache. Memory stays flat regardless of file size."
+        },
+        "fixedWidthQuery.checkpointStride": {
+          "type": "number",
+          "default": 4096,
+          "minimum": 256,
+          "maximum": 65536,
+          "description": "Rows between two index checkpoints. Higher values use less memory and make row lookup slower."
+        },
+        "fixedWidthQuery.defaultEncoding": {
+          "type": "string",
+          "default": "latin1",
+          "enum": [
+            "latin1",
+            "utf8",
+            "ascii"
+          ],
+          "description": "Encoding assumed for a file with no schema profile."
+        },
+        "fixedWidthQuery.maxQueryResults": {
+          "type": "number",
+          "default": 2000000,
+          "minimum": 1000,
+          "description": "Maximum number of matching rows retained by a query. Beyond this the scan stops and reports truncation."
+        },
+        "fixedWidthQuery.workerHeapMb": {
+          "type": "number",
+          "default": 192,
+          "minimum": 64,
+          "maximum": 1024,
+          "description": "Heap ceiling per worker thread. A worker exceeding it is terminated instead of taking down the window."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs --production",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p src/webview/tsconfig.json",
+    "lint": "eslint src --ext .ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "bench": "vitest bench",
+    "fixture": "node scripts/make-fixture.mjs",
+    "vscode:prepublish": "npm run build",
+    "package": "vsce package",
+    "smoke": "npm run build && node scripts/smoke.mjs",
+    "verify": "npm run typecheck && npm run test && npm run smoke"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^7.13.0",
+    "@typescript-eslint/parser": "^7.13.0",
+    "esbuild": "^0.21.5",
+    "eslint": "^8.57.0",
+    "typescript": "^5.4.5",
+    "vitest": "^1.6.0"
+  },
+  "dependencies": {}
+}
