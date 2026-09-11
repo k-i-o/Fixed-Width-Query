@@ -6,6 +6,19 @@
   "publisher": "samueleradici",
   "license": "MIT",
   "author": "Samuele Radici (kio)",
+  "icon": "media/icon.png",
+  "galleryBanner": {
+    "color": "#1F2430",
+    "theme": "dark"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/k-i-o/Fixed-Width-Query.git"
+  },
+  "bugs": {
+    "url": "https://github.com/k-i-o/Fixed-Width-Query/issues"
+  },
+  "homepage": "https://github.com/k-i-o/Fixed-Width-Query#readme",
   "engines": {
     "vscode": "^1.85.0",
     "node": ">=18"
@@ -92,6 +105,16 @@
         "command": "fixedWidthQuery.saveSchema",
         "title": "Save Schema Profile (.fwq.json)",
         "category": "Fixed-Width Query"
+      },
+      {
+        "command": "fixedWidthQuery.saveSchemaAs",
+        "title": "Save Schema Profile As...",
+        "category": "Fixed-Width Query"
+      },
+      {
+        "command": "fixedWidthQuery.loadSchema",
+        "title": "Load Schema Profile...",
+        "category": "Fixed-Width Query"
       }
     ],
     "menus": {
@@ -122,6 +145,14 @@
         {
           "command": "fixedWidthQuery.saveSchema",
           "when": "fixedWidthQuery.editorFocused"
+        },
+        {
+          "command": "fixedWidthQuery.saveSchemaAs",
+          "when": "fixedWidthQuery.editorFocused"
+        },
+        {
+          "command": "fixedWidthQuery.loadSchema",
+          "when": "fixedWidthQuery.editorFocused"
         }
       ]
     },
@@ -151,10 +182,10 @@
         },
         "fixedWidthQuery.pageCacheBytes": {
           "type": "number",
-          "default": 67108864,
+          "default": 33554432,
           "minimum": 8388608,
           "maximum": 268435456,
-          "description": "Hard ceiling for the raw page cache. Memory stays flat regardless of file size."
+          "description": "Hard ceiling for the raw page cache. Memory stays flat regardless of file size. Measured: 32 MB meets the 200 MB RSS budget with margin, and raising it to 64 MB moved p99 row latency by under 0.2 ms."
         },
         "fixedWidthQuery.checkpointStride": {
           "type": "number",
@@ -201,7 +232,10 @@
     "vscode:prepublish": "npm run build",
     "package": "vsce package",
     "smoke": "npm run build && node scripts/smoke.mjs",
-    "verify": "npm run typecheck && npm run test && npm run smoke"
+    "verify": "npm run typecheck && npm run test && npm run smoke",
+    "build:probe": "node esbuild.mjs --probe",
+    "perf": "node scripts/perf.mjs",
+    "edge-cases": "node scripts/edge-cases.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

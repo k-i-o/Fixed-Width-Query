@@ -60,12 +60,15 @@ export class WorkerTask<TMessage> {
     return this.worker !== null && !this.terminated;
   }
 
-  terminate(): void {
+  /**
+   * Stop the worker. The returned promise resolves once the thread has actually exited and
+   * its isolate is gone — which is when its memory comes back. Callers that only need the
+   * cancellation to have started can ignore it; teardown and measurement should await it.
+   */
+  terminate(): Promise<void> {
     this.terminated = true;
     const worker = this.worker;
     this.worker = null;
-    if (worker) {
-      void worker.terminate();
-    }
+    return worker ? worker.terminate().then(() => undefined) : Promise.resolve();
   }
 }

@@ -139,6 +139,30 @@ export class SparseIndex {
     };
   }
 
+  /**
+   * Average bytes per record, measured from checkpoint spacing.
+   *
+   * The row reader needs this to size its reads. Guessing a constant is expensive in both
+   * directions: guess high and every 256-row fetch drags megabytes through the page cache
+   * for kilobytes of data; guess low and the read comes up short and has to be repeated.
+   * Consecutive checkpoints are exactly `stride` rows apart, so the file answers this
+   * question about itself.
+   *
+   * Returns 0 when nothing is known yet, which the caller reads as "use a default".
+   */
+  get averageRecordBytes(): number {
+    if (this.mode === 'fixed-length') {
+      return this.recordLength;
+    }
+    if (this.checkpointCount < 2) {
+      return 0;
+    }
+    const first = this.checkpoints[0] ?? 0;
+    const last = this.checkpoints[this.checkpointCount - 1] ?? 0;
+    const rows = (this.checkpointCount - 1) * this.stride;
+    return rows > 0 ? (last - first) / rows : 0;
+  }
+
   /** Highest row whose offset is currently resolvable — indexing runs behind the UI. */
   get resolvableRows(): number {
     if (this.mode === 'fixed-length' || this.done) {

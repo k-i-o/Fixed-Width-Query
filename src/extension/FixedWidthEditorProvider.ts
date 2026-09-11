@@ -34,7 +34,7 @@ function readSettings(): SessionSettings {
   const config = vscode.workspace.getConfiguration('fixedWidthQuery');
   return {
     pageSizeBytes: config.get<number>('pageSizeBytes', 1048576),
-    pageCacheBytes: config.get<number>('pageCacheBytes', 67108864),
+    pageCacheBytes: config.get<number>('pageCacheBytes', 33554432),
     checkpointStride: config.get<number>('checkpointStride', 4096),
     defaultEncoding: config.get<'utf8' | 'latin1' | 'ascii'>('defaultEncoding', 'latin1'),
     maxQueryResults: config.get<number>('maxQueryResults', 2000000),
@@ -81,6 +81,8 @@ export class FixedWidthEditorProvider implements vscode.CustomReadonlyEditorProv
         }
       }),
       vscode.commands.registerCommand('fixedWidthQuery.saveSchema', () => this.saveSchema()),
+      vscode.commands.registerCommand('fixedWidthQuery.saveSchemaAs', () => this.saveSchemaAs()),
+      vscode.commands.registerCommand('fixedWidthQuery.loadSchema', () => this.loadSchema()),
       vscode.commands.registerCommand('fixedWidthQuery.exportResult', () => this.exportResult()),
       vscode.commands.registerCommand('fixedWidthQuery.openWith', async (uri?: vscode.Uri) => {
         const target = uri ?? vscode.window.activeTextEditor?.document.uri;
@@ -273,6 +275,16 @@ export class FixedWidthEditorProvider implements vscode.CustomReadonlyEditorProv
         break;
       }
 
+      case 'saveSchemaAs': {
+        await this.saveSchemaAs();
+        break;
+      }
+
+      case 'loadSchema': {
+        await this.loadSchema();
+        break;
+      }
+
       case 'exportResult': {
         await this.exportResult();
         break;
@@ -297,6 +309,46 @@ export class FixedWidthEditorProvider implements vscode.CustomReadonlyEditorProv
       void vscode.window.showInformationMessage(`Schema profile saved to ${target}`);
     } catch (error) {
       void vscode.window.showErrorMessage(`Could not save the schema profile: ${(error as Error).message}`);
+    }
+  }
+
+  /** Save the current layout anywhere, so it can be shared or reused across files. */
+  private async saveSchemaAs(): Promise<void> {
+    const session = this.activeSession;
+    if (!session) {
+      return;
+    }
+    const target = await vscode.window.showSaveDialog({
+      defaultUri: vscode.Uri.file(session.profilePath ?? `${session.uri.fsPath}.fwq.json`),
+      filters: { 'Schema profile': ['json'] },
+      saveLabel: 'Save profile',
+    });
+    if (!target) {
+      return;
+    }
+    try {
+      await session.saveSchemaProfileTo(target.fsPath);
+      void vscode.window.showInformationMessage(`Schema profile saved to ${target.fsPath}`);
+    } catch (error) {
+      void vscode.window.showErrorMessage(`Could not save the schema profile: ${(error as Error).message}`);
+    }
+  }
+
+  /** Apply a profile authored against a different file with the same layout. */
+  private async loadSchema(): Promise<void> {
+    const session = this.activeSession;
+    if (!session) {
+      return;
+    }
+    const picked = await vscode.window.showOpenDialog({
+      defaultUri: vscode.Uri.joinPath(session.uri, '..'),
+      canSelectMany: false,
+      filters: { 'Schema profile': ['json'] },
+      openLabel: 'Apply profile',
+    });
+    const source = picked?.[0];
+    if (source) {
+      await session.applyProfileFrom(source.fsPath);
     }
   }
 

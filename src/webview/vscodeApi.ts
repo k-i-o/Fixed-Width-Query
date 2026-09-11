@@ -21,6 +21,10 @@ export function post(message: ToHost): void {
 export interface PersistedState {
   readonly firstRow?: number;
   readonly query?: string;
+  /** Column widths the user dragged, in column order. */
+  readonly columnWidths?: readonly number[];
+  /** Signature of the columns those widths belong to; see widthKey() in main.ts. */
+  readonly columnWidthKey?: string;
 }
 
 export function getState(): PersistedState {

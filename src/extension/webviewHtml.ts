@@ -42,9 +42,11 @@ export function renderWebviewHtml(webview: vscode.Webview, extensionUri: vscode.
           <span>Go to row</span>
           <input id="goto-row" type="number" min="1" step="1" placeholder="1">
         </label>
+        <button id="btn-fit-columns" type="button" title="Resize every column to fit its visible contents">Fit columns</button>
         <button id="btn-schema" type="button">Schema</button>
         <button id="btn-ruler" type="button">Ruler</button>
-        <button id="btn-save-schema" type="button">Save profile</button>
+        <button id="btn-load-schema" type="button" title="Apply a .fwq.json profile saved for another file">Load profile</button>
+        <button id="btn-save-schema" type="button" title="Save beside this file, so it reloads automatically next time. Shift-click to choose a location.">Save profile</button>
       </div>
 
       <div class="toolbar-row">
@@ -58,6 +60,7 @@ export function renderWebviewHtml(webview: vscode.Webview, extensionUri: vscode.
 
       <div id="query-status" class="status" hidden></div>
       <div id="index-status" class="status subtle"></div>
+      <div id="profile-status" class="status subtle"></div>
     </header>
 
     <section id="schema-panel" class="panel" hidden>

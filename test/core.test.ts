@@ -17,6 +17,7 @@ import { compileQuery } from '../src/core/query/compile.js';
 import { encodeRows, RowsFlags, RowsView } from '../src/shared/rowsCodec.js';
 import { filtersToExpr, filtersToSql } from '../src/core/query/uiFilters.js';
 import type { SchemaProfile } from '../src/shared/schema.js';
+import { computeColumnOffsets, GUTTER_WIDTH } from '../src/webview/virtualGrid.js';
 
 const bytes = (text: string): Uint8Array => new Uint8Array(Buffer.from(text, 'latin1'));
 
@@ -348,5 +349,26 @@ describe('binary rows envelope', () => {
     shifted.set(payload, 1);
     const view = new RowsView(shifted.subarray(1));
     expect(view.cell(0, 0)).toBe('hello');
+  });
+});
+
+describe('grid column geometry', () => {
+  it('starts the first column after the gutter, not on top of it', () => {
+    // Regression: offsets used to start at 0, so every first-column cell overlapped the
+    // row-number gutter. Cells are transparent, so the row numbers showed through wherever
+    // the cell text was shorter than the number — visible, wrong, and easy to miss.
+    const offsets = computeColumnOffsets([100, 80, 120]);
+    expect(offsets[0]).toBe(GUTTER_WIDTH);
+    expect(offsets[0]).toBeGreaterThan(0);
+  });
+
+  it('accumulates widths and ends with the total', () => {
+    const offsets = computeColumnOffsets([100, 80, 120], 76);
+    expect(offsets).toEqual([76, 176, 256, 376]);
+    expect(offsets[offsets.length - 1]).toBe(76 + 100 + 80 + 120);
+  });
+
+  it('handles a schema with no columns', () => {
+    expect(computeColumnOffsets([], 76)).toEqual([76]);
   });
 });

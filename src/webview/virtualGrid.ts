@@ -19,12 +19,58 @@ const OVERSCAN_ROWS = 6;
 const OVERSCAN_COLUMNS = 2;
 
 /**
+ * Width of the row-number gutter.
+ *
+ * Column offsets start here, not at zero. They used to start at zero, which put every cell
+ * of the first column directly on top of the gutter: cells have no background, so the row
+ * numbers showed through wherever the cell text happened to be shorter than the number.
+ * Must stay in sync with --fwq-gutter-width in style.css.
+ */
+const GUTTER_WIDTH = 76;
+
+/** Floor for a width the user drags to. Deliberately low: narrowing is a choice. */
+const MIN_COLUMN_WIDTH = 40;
+const MAX_COLUMN_WIDTH = 1400;
+
+/**
+ * Floor for the *default* width of a column.
+ *
+ * Set by the filter row rather than by the data: the operator select and the value box
+ * split the column between them, so the column has to fit both. At 190px each gets about
+ * 90px, which is what "contains" needs to read as a word rather than as "cont". Content can
+ * always be narrower than its own filter control, so the control sets the minimum.
+ */
+const DEFAULT_MIN_WIDTH = 190;
+/** Grab area of the drag handle on a column's trailing edge. */
+const RESIZE_HANDLE_WIDTH = 9;
+
+/**
  * Browsers cap element height near 33.5M pixels in Chromium; past that, scrolling silently
  * loses precision and the scrollbar starts jumping. At 22px per row that ceiling arrives
  * around 1.5M rows — well inside our target. So the sizer is capped and scroll position is
  * mapped onto the row range instead of corresponding to it one-to-one.
  */
 const MAX_SIZER_PX = 10_000_000;
+
+/**
+ * Absolute left offset of each column, plus a trailing entry holding the total width.
+ *
+ * Pure, exported and tested: the first entry being GUTTER_WIDTH rather than 0 is the whole
+ * difference between a correct grid and one where the row numbers bleed through the first
+ * column's cells, and that is not a thing to leave to a code review.
+ */
+export function computeColumnOffsets(
+  widths: readonly number[],
+  gutterWidth: number = GUTTER_WIDTH,
+): number[] {
+  const offsets = [gutterWidth];
+  for (const width of widths) {
+    offsets.push((offsets[offsets.length - 1] as number) + width);
+  }
+  return offsets;
+}
+
+export { GUTTER_WIDTH };
 
 export interface GridProvider {
   /** Cell text, or null when the block is still in flight — the grid draws a skeleton. */
@@ -37,12 +83,15 @@ export class VirtualGrid {
   private rowCount = 0;
   private columns: string[] = [];
   private columnWidths: number[] = [];
-  private columnOffsets: number[] = [0];
+  private columnOffsets: number[] = [GUTTER_WIDTH];
 
   private firstRow = 0;
   private poolSize = 0;
   private readonly rowNodes: HTMLDivElement[] = [];
   private readonly cellNodes: HTMLDivElement[][] = [];
+
+  private readonly headerCells: HTMLDivElement[] = [];
+  private readonly filterCells: HTMLDivElement[] = [];
 
   private viewportHeight = 0;
   private viewportWidth = 0;
@@ -53,6 +102,11 @@ export class VirtualGrid {
   private firstColumn = 0;
   private lastColumn = 0;
 
+  private resizing: { column: number; startX: number; startWidth: number } | null = null;
+  /** Font of a data cell, cached for text measurement during auto-fit. */
+  private cellFont = '';
+  private measureContext: CanvasRenderingContext2D | null = null;
+
   constructor(
     private readonly viewport: HTMLElement,
     private readonly sizer: HTMLElement,
@@ -62,6 +116,7 @@ export class VirtualGrid {
     private readonly provider: GridProvider,
     private readonly onRangeChanged: (firstRow: number, count: number) => void,
     private readonly onScrollRow: (firstRow: number) => void,
+    private readonly onColumnWidths: (widths: readonly number[]) => void,
   ) {
     this.viewport.addEventListener('scroll', () => this.handleScroll(), { passive: true });
 
@@ -108,6 +163,14 @@ export class VirtualGrid {
     return this.rowCount * ROW_HEIGHT > MAX_SIZER_PX;
   }
 
+  private recomputeOffsets(): void {
+    this.columnOffsets = computeColumnOffsets(this.columnWidths);
+  }
+
+  get totalWidth(): number {
+    return this.columnOffsets[this.columnOffsets.length - 1] ?? GUTTER_WIDTH;
+  }
+
   // ------------------------------------------------------------------ pool
 
   private resizePool(size: number): void {
@@ -150,21 +213,30 @@ export class VirtualGrid {
 
   // ------------------------------------------------------------------ data
 
-  setColumns(names: readonly string[], widths?: readonly number[]): void {
+  /**
+   * @param declaredLengths field lengths from a fixed-width schema, used for the initial
+   *   estimate so the grid opens looking like the file does.
+   * @param savedWidths widths the user set previously, which always win over the estimate.
+   */
+  setColumns(
+    names: readonly string[],
+    declaredLengths?: readonly number[],
+    savedWidths?: readonly number[],
+  ): void {
     this.columns = [...names];
     this.columnWidths = this.columns.map((name, index) => {
-      const declared = widths?.[index];
-      // Width tracks the declared field length where there is one, so a fixed-width file
-      // lines up on screen the way it does in the file.
-      const estimated = declared && declared > 0 ? declared * 8 + 16 : Math.max(90, name.length * 9 + 24);
-      return Math.min(600, Math.max(60, estimated));
+      const saved = savedWidths?.[index];
+      if (saved && saved >= MIN_COLUMN_WIDTH) {
+        return Math.min(MAX_COLUMN_WIDTH, saved);
+      }
+      const declared = declaredLengths?.[index];
+      // Fixed-width fields get a width proportional to their declared byte length, so the
+      // grid opens looking like the file does; otherwise fall back to the header name.
+      const estimated = declared && declared > 0 ? declared * 8 + 20 : name.length * 9 + 40;
+      return Math.min(600, Math.max(DEFAULT_MIN_WIDTH, estimated));
     });
 
-    this.columnOffsets = [0];
-    for (const width of this.columnWidths) {
-      this.columnOffsets.push((this.columnOffsets[this.columnOffsets.length - 1] as number) + width);
-    }
-
+    this.recomputeOffsets();
     this.renderHeader();
     this.render();
   }
@@ -178,12 +250,12 @@ export class VirtualGrid {
     this.render();
   }
 
-  get totalWidth(): number {
-    return this.columnOffsets[this.columnOffsets.length - 1] ?? 0;
-  }
-
   get currentFirstRow(): number {
     return this.firstRow;
+  }
+
+  get widths(): readonly number[] {
+    return this.columnWidths;
   }
 
   scrollToRow(row: number): void {
@@ -253,6 +325,136 @@ export class VirtualGrid {
     });
   }
 
+  // ------------------------------------------------------------------ resizing
+
+  /**
+   * Drag the trailing edge of a header cell to resize; double-click it to fit the content.
+   *
+   * Resizing is live rather than an overlay-then-commit, because judging a column width
+   * against the actual data is the whole point. It stays cheap because a resize only writes
+   * `left`/`width` on the nodes already on screen — no node is created or destroyed, and the
+   * work is coalesced into one animation frame like scrolling is.
+   */
+  private attachResizeHandle(headerCell: HTMLDivElement, column: number): void {
+    const handle = document.createElement('div');
+    handle.className = 'col-resize';
+    handle.style.width = `${RESIZE_HANDLE_WIDTH}px`;
+    handle.title = 'Drag to resize · double-click to fit contents';
+
+    handle.addEventListener('pointerdown', (event: PointerEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      handle.setPointerCapture(event.pointerId);
+      this.resizing = {
+        column,
+        startX: event.clientX,
+        startWidth: this.columnWidths[column] ?? 100,
+      };
+      document.body.classList.add('resizing-column');
+    });
+
+    handle.addEventListener('pointermove', (event: PointerEvent) => {
+      const state = this.resizing;
+      if (!state) {
+        return;
+      }
+      const width = state.startWidth + (event.clientX - state.startX);
+      this.setColumnWidth(state.column, width);
+    });
+
+    const finish = (event: PointerEvent): void => {
+      if (!this.resizing) {
+        return;
+      }
+      this.resizing = null;
+      document.body.classList.remove('resizing-column');
+      if (handle.hasPointerCapture(event.pointerId)) {
+        handle.releasePointerCapture(event.pointerId);
+      }
+      // Persist only on release: writing state on every frame of a drag is pointless churn.
+      this.onColumnWidths(this.columnWidths);
+    };
+    handle.addEventListener('pointerup', finish);
+    handle.addEventListener('pointercancel', finish);
+
+    handle.addEventListener('dblclick', (event: MouseEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      this.autoFitColumn(column);
+      this.onColumnWidths(this.columnWidths);
+    });
+
+    headerCell.appendChild(handle);
+  }
+
+  private setColumnWidth(column: number, width: number): void {
+    const clamped = Math.max(MIN_COLUMN_WIDTH, Math.min(MAX_COLUMN_WIDTH, Math.round(width)));
+    if (this.columnWidths[column] === clamped) {
+      return;
+    }
+    this.columnWidths[column] = clamped;
+    this.recomputeOffsets();
+    this.applyColumnGeometry();
+    this.scheduleRender();
+  }
+
+  /**
+   * Size a column to its widest currently loaded value.
+   *
+   * Deliberately samples only the rows already in the DOM. Measuring the true widest value
+   * would mean reading the whole file for a cosmetic decision; what the user can see is what
+   * they are judging the width against anyway.
+   */
+  private autoFitColumn(column: number): void {
+    const context = this.measurementContext();
+    if (!context) {
+      return;
+    }
+    const start = Math.max(0, this.firstRow - Math.floor(OVERSCAN_ROWS / 2));
+    let widest = context.measureText(this.columns[column] ?? '').width + 24;
+
+    for (let i = 0; i < this.rowNodes.length; i++) {
+      const value = this.provider.cell(start + i, column);
+      if (value) {
+        widest = Math.max(widest, context.measureText(value).width);
+      }
+    }
+
+    // 12px of padding either side, matching .grid-cell, plus a little breathing room.
+    this.setColumnWidth(column, Math.ceil(widest) + 16);
+  }
+
+  /** Canvas text measurement: no layout, unlike reading offsetWidth off a probe element. */
+  private measurementContext(): CanvasRenderingContext2D | null {
+    if (!this.measureContext) {
+      this.measureContext = document.createElement('canvas').getContext('2d');
+    }
+    if (this.measureContext && this.cellFont === '') {
+      const sample = this.rowsContainer.querySelector('.grid-cell');
+      if (sample) {
+        const style = getComputedStyle(sample);
+        this.cellFont = `${style.fontSize} ${style.fontFamily}`;
+      }
+    }
+    if (this.measureContext) {
+      this.measureContext.font = this.cellFont || '13px monospace';
+    }
+    return this.measureContext;
+  }
+
+  /** Fit every column at once, from the toolbar. */
+  autoFitAll(): void {
+    for (let column = 0; column < this.columns.length; column++) {
+      this.autoFitColumn(column);
+    }
+    this.onColumnWidths(this.columnWidths);
+  }
+
+  resetWidths(): void {
+    this.setColumns(this.columns);
+    this.onColumnWidths(this.columnWidths);
+  }
+
   // ------------------------------------------------------------------ render
 
   private computeColumnWindow(): boolean {
@@ -276,9 +478,12 @@ export class VirtualGrid {
     return false;
   }
 
+  /** Build the header and filter rows. Only called when the column set itself changes. */
   private renderHeader(): void {
     this.header.textContent = '';
     this.filters.textContent = '';
+    this.headerCells.length = 0;
+    this.filterCells.length = 0;
 
     const gutter = document.createElement('div');
     gutter.className = 'grid-gutter header-gutter';
@@ -292,30 +497,56 @@ export class VirtualGrid {
     for (let column = 0; column < this.columns.length; column++) {
       const cell = document.createElement('div');
       cell.className = 'grid-cell header-cell';
-      cell.style.left = `${this.columnOffsets[column] ?? 0}px`;
-      cell.style.width = `${this.columnWidths[column] ?? 100}px`;
       // textContent, never innerHTML: column names can come from a file we did not write.
       cell.textContent = this.columns[column] ?? '';
       cell.title = this.columns[column] ?? '';
+      this.attachResizeHandle(cell, column);
       this.header.appendChild(cell);
+      this.headerCells.push(cell);
 
       const filterCell = document.createElement('div');
       filterCell.className = 'grid-cell filter-cell';
-      filterCell.style.left = `${this.columnOffsets[column] ?? 0}px`;
-      filterCell.style.width = `${this.columnWidths[column] ?? 100}px`;
       filterCell.dataset['column'] = String(column);
       this.filters.appendChild(filterCell);
+      this.filterCells.push(filterCell);
+    }
+
+    this.applyColumnGeometry();
+  }
+
+  /**
+   * Push current widths onto the header and filter nodes.
+   *
+   * Separate from renderHeader so a resize drag rewrites two style properties per visible
+   * column instead of rebuilding several hundred DOM nodes per frame.
+   */
+  private applyColumnGeometry(): void {
+    for (let column = 0; column < this.headerCells.length; column++) {
+      const left = `${this.columnOffsets[column] ?? 0}px`;
+      const width = `${this.columnWidths[column] ?? 100}px`;
+
+      const headerCell = this.headerCells[column];
+      if (headerCell) {
+        headerCell.style.left = left;
+        headerCell.style.width = width;
+      }
+      const filterCell = this.filterCells[column];
+      if (filterCell) {
+        filterCell.style.left = left;
+        filterCell.style.width = width;
+      }
     }
 
     const width = `${this.totalWidth}px`;
     this.header.style.width = width;
     this.filters.style.width = width;
     this.sizer.style.width = width;
+    this.rowsContainer.style.width = width;
   }
 
-  /** Called by main.ts after the header is built, to drop filter inputs into their cells. */
+  /** Used by main.ts to drop filter inputs into their cells after the header is built. */
   filterCellFor(column: number): HTMLElement | null {
-    return this.filters.querySelector(`.filter-cell[data-column="${column}"]`);
+    return this.filterCells[column] ?? null;
   }
 
   render(): void {
@@ -329,7 +560,6 @@ export class VirtualGrid {
     const start = Math.max(0, this.firstRow - Math.floor(OVERSCAN_ROWS / 2));
     // translate3d keeps the block on the compositor; animating `top` would force layout.
     this.rowsContainer.style.transform = `translate3d(0, ${this.blockTop(start)}px, 0)`;
-    this.rowsContainer.style.width = `${this.totalWidth}px`;
 
     for (let i = 0; i < this.rowNodes.length; i++) {
       const rowNode = this.rowNodes[i] as HTMLDivElement;
@@ -363,9 +593,12 @@ export class VirtualGrid {
           // Placeholder, same height: the grid never waits for data to draw a frame.
           cell.classList.add('pending');
           cell.textContent = '';
+          cell.removeAttribute('title');
         } else {
           cell.classList.remove('pending');
           cell.textContent = value;
+          // A narrowed column truncates; the full value stays reachable on hover.
+          cell.title = value;
         }
       }
     }

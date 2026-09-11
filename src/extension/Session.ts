@@ -10,18 +10,17 @@ import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 
-import { createRecordParser, inferRegexColumns } from '../core/parse/columns.js';
-import { makeDecoder } from '../core/parse/decode.js';
-import { bomLength, detectLineEnding, walkRecords, type ResolvedLineEnding } from '../core/parse/records.js';
+import { inferRegexColumns } from '../core/parse/columns.js';
+import { bomLength, detectLineEnding, type ResolvedLineEnding } from '../core/parse/records.js';
 import { SparseIndex } from '../core/index/sparseIndex.js';
 import { parseQuery, validateStatement } from '../core/query/parser.js';
 import { filtersToExpr } from '../core/query/uiFilters.js';
 import type { SelectStatement } from '../core/query/ast.js';
-import { encodeRows, RowsFlags } from '../shared/rowsCodec.js';
 import { DEFAULT_SCHEMA, columnsFromWidths, validateSchema, type SchemaProfile } from '../shared/schema.js';
 import type { FileMeta, RowRange, ToWebview, UiFilter } from '../shared/protocol.js';
 import type { IndexMessage, QueryMessage } from '../shared/workerProtocol.js';
 import { FileHandleService } from './FileHandleService.js';
+import { RowFetcher, type ResultSet } from './RowFetcher.js';
 import { WorkerTask } from './workerHost.js';
 
 export interface SessionSettings {
@@ -33,12 +32,12 @@ export interface SessionSettings {
   readonly workerHeapMb: number;
 }
 
-const SAMPLE_RECORD_LIMIT = 200;
 const INDEX_CHUNK_BYTES = 4 * 1024 * 1024;
 const QUERY_CHUNK_BYTES = 4 * 1024 * 1024;
 
 export class Session {
   private readonly file: FileHandleService;
+  private rows: RowFetcher;
   private index: SparseIndex;
   private schema: SchemaProfile;
   private lineEnding: ResolvedLineEnding = 'lf';
@@ -52,6 +51,9 @@ export class Session {
   private resultOffsets: Float64Array | null = null;
   private resultRows: Float64Array | null = null;
 
+  /** Path of the profile backing the current schema, or null when it was inferred. */
+  private activeProfilePath: string | null = null;
+
   private disposed = false;
 
   constructor(
@@ -63,6 +65,7 @@ export class Session {
     this.file = new FileHandleService(uri.fsPath, settings.pageSizeBytes, settings.pageCacheBytes);
     this.schema = { ...DEFAULT_SCHEMA, encoding: settings.defaultEncoding };
     this.index = SparseIndex.forDelimited(settings.checkpointStride, 0);
+    this.rows = new RowFetcher(this.file, this.schema, this.lineEnding, this.dataStart);
   }
 
   // ---------------------------------------------------------------- lifecycle
@@ -75,6 +78,7 @@ export class Session {
     const head = await this.file.read(0, Math.min(64 * 1024, this.file.size));
     this.dataStart = bomLength(head);
     this.lineEnding = detectLineEnding(head.subarray(this.dataStart));
+    this.rows.update(this.schema, this.lineEnding, this.dataStart);
 
     await this.loadSchemaProfile();
     this.rebuildIndex();
@@ -89,6 +93,7 @@ export class Session {
       const validation = validateSchema(parsed);
       if (validation.ok) {
         this.schema = parsed;
+        this.activeProfilePath = profilePath;
         return;
       }
       this.post({
@@ -114,6 +119,7 @@ export class Session {
     }
     const columns = inferRegexColumns(this.schema, lines);
     this.schema = { ...this.schema, columns };
+    this.rows.update(this.schema, this.lineEnding, this.dataStart);
   }
 
   private rebuildIndex(): void {
@@ -124,6 +130,7 @@ export class Session {
     if (this.schema.lineEnding === 'none' && this.schema.recordLength) {
       this.index = SparseIndex.forFixedLength(this.file.size, this.schema.recordLength, this.dataStart);
       this.lineEnding = 'none';
+      this.rows.update(this.schema, this.lineEnding, this.dataStart);
       this.postMeta();
       this.post({
         type: 'indexProgress',
@@ -139,6 +146,7 @@ export class Session {
       ? this.lineEnding
       : (this.schema.lineEnding as ResolvedLineEnding);
 
+    this.rows.update(this.schema, this.lineEnding, this.dataStart);
     this.index = SparseIndex.forDelimited(this.settings.checkpointStride, this.dataStart);
     this.postMeta();
 
@@ -223,6 +231,7 @@ export class Session {
 
   sendInit(): void {
     this.post({ type: 'init', meta: this.meta, schema: this.schema, columns: this.columnNames });
+    this.postProfile();
   }
 
   // ---------------------------------------------------------------- schema
@@ -248,6 +257,7 @@ export class Session {
     }
 
     this.schema = resolved;
+    this.rows.update(this.schema, this.lineEnding, this.dataStart);
     this.clearResult();
     this.post({ type: 'schema', schema: this.schema, columns: this.columnNames });
 
@@ -268,120 +278,79 @@ export class Session {
     return { ...this.schema, mode: 'fixed', columns: columnsFromWidths(widths, names) };
   }
 
+  /** Default location: beside the data file, so reopening that file picks it up by itself. */
   async saveSchemaProfile(): Promise<string> {
-    const target = `${this.uri.fsPath}.fwq.json`;
+    return this.saveSchemaProfileTo(`${this.uri.fsPath}.fwq.json`);
+  }
+
+  async saveSchemaProfileTo(target: string): Promise<string> {
     await fs.writeFile(target, `${JSON.stringify(this.schema, null, 2)}\n`, 'utf8');
+    this.activeProfilePath = target;
+    this.postProfile();
     return target;
+  }
+
+  /**
+   * Apply a profile saved anywhere, not just the one beside this file.
+   *
+   * This is what makes a profile worth saving. One copybook typically describes a whole
+   * directory of monthly extracts, and a layout that only ever applied to the single file
+   * it was authored against would have to be redefined for every one of them.
+   */
+  async applyProfileFrom(source: string): Promise<void> {
+    let parsed: SchemaProfile;
+    try {
+      parsed = JSON.parse(await fs.readFile(source, 'utf8')) as SchemaProfile;
+    } catch (error) {
+      this.post({
+        type: 'error',
+        code: 'SCHEMA_INVALID',
+        message: `Could not read that profile: ${(error as Error).message}`,
+        detail: source,
+      });
+      return;
+    }
+
+    const validation = validateSchema(parsed);
+    if (!validation.ok) {
+      this.post({
+        type: 'error',
+        code: 'SCHEMA_INVALID',
+        message: `That profile is not valid: ${validation.errors.join(' ')}`,
+        detail: source,
+      });
+      return;
+    }
+
+    this.activeProfilePath = source;
+    // setSchema re-infers regex columns, rebuilds the index if the framing changed, and
+    // pushes the new columns to the webview.
+    await this.setSchema(parsed);
+    this.postProfile();
+  }
+
+  get profilePath(): string | null {
+    return this.activeProfilePath;
+  }
+
+  private postProfile(): void {
+    this.post({ type: 'profile', path: this.activeProfilePath });
   }
 
   // ---------------------------------------------------------------- rows
 
-  /**
-   * Read raw record text for the ruler and for schema inference. Bounded by design: this
-   * is a sample, never the file.
-   */
-  async sampleRecords(limit: number): Promise<string[]> {
-    const count = Math.min(limit, SAMPLE_RECORD_LIMIT);
-    const recordLength = this.schema.recordLength ?? 0;
-    const span = this.lineEnding === 'none' && recordLength > 0
-      ? recordLength * count
-      : Math.min(1024 * 1024, this.file.size);
-
-    const bytes = await this.file.read(this.dataStart, span);
-    const spans = walkRecords(bytes, this.dataStart, this.dataStart, count, this.lineEnding, recordLength, true);
-    const decode = makeDecoder(this.schema.encoding);
-    return spans.map((record) => decode(bytes, record.start - this.dataStart, record.end - this.dataStart));
+  private get resultSet(): ResultSet | null {
+    return this.resultOffsets && this.resultRows
+      ? { offsets: this.resultOffsets, rowIndices: this.resultRows }
+      : null;
   }
 
-  /**
-   * Resolve a range of display rows into an encoded payload.
-   *
-   * In result mode the byte offsets come straight from the query worker, so no index
-   * lookup happens at all. In file mode, the sparse index gives the nearest checkpoint and
-   * we walk forward from there.
-   */
+  async sampleRecords(limit: number): Promise<string[]> {
+    return this.rows.sampleRecords(limit);
+  }
+
   async fetchRows(range: RowRange): Promise<Uint8Array> {
-    const parser = createRecordParser(this.schema);
-    const columnCount = Math.max(1, parser.columnCount);
-    const recordLength = this.schema.recordLength ?? 0;
-
-    const rowIndices = new Float64Array(range.count);
-    const cells: string[] = [];
-    let produced = 0;
-
-    if (this.resultOffsets && this.resultRows) {
-      // Result mode: each row is an independent positional read.
-      const available = Math.max(0, Math.min(range.count, this.resultOffsets.length - range.from));
-      for (let i = 0; i < available; i++) {
-        const offset = this.resultOffsets[range.from + i] ?? 0;
-        const maxRecord = recordLength > 0 ? recordLength : 64 * 1024;
-        const bytes = await this.file.read(offset, maxRecord);
-        const spans = walkRecords(bytes, offset, offset, 1, this.lineEnding, recordLength, true);
-        const span = spans[0];
-        if (!span) {
-          continue;
-        }
-        parser.parse(bytes, span.start - offset, span.end - offset);
-        rowIndices[produced] = this.resultRows[range.from + i] ?? 0;
-        for (let column = 0; column < columnCount; column++) {
-          cells.push(parser.text(column));
-        }
-        produced++;
-      }
-    } else {
-      const { anchorRow, byteOffset } = this.index.locate(range.from);
-      const skipAhead = range.from - anchorRow;
-
-      // Read enough to cover the skip plus the requested rows. An overly long record simply
-      // triggers a second read rather than being truncated.
-      const estimatedRecord = recordLength > 0 ? recordLength : 512;
-      const needed = (skipAhead + range.count + 2) * estimatedRecord;
-      let bytes = await this.file.read(byteOffset, Math.min(needed, 16 * 1024 * 1024));
-
-      let spans = walkRecords(
-        bytes,
-        byteOffset,
-        byteOffset,
-        skipAhead + range.count,
-        this.lineEnding,
-        recordLength,
-        byteOffset + bytes.length >= this.file.size,
-      );
-
-      if (spans.length < skipAhead + range.count && byteOffset + bytes.length < this.file.size) {
-        bytes = await this.file.read(byteOffset, Math.min(needed * 4, 64 * 1024 * 1024));
-        spans = walkRecords(
-          bytes,
-          byteOffset,
-          byteOffset,
-          skipAhead + range.count,
-          this.lineEnding,
-          recordLength,
-          byteOffset + bytes.length >= this.file.size,
-        );
-      }
-
-      for (let i = skipAhead; i < spans.length && produced < range.count; i++) {
-        const span = spans[i];
-        if (!span) {
-          break;
-        }
-        parser.parse(bytes, span.start - byteOffset, span.end - byteOffset);
-        rowIndices[produced] = anchorRow + i;
-        for (let column = 0; column < columnCount; column++) {
-          cells.push(parser.text(column));
-        }
-        produced++;
-      }
-    }
-
-    return encodeRows({
-      rowCount: produced,
-      columnCount,
-      sourceRowIndex: rowIndices,
-      cells,
-      flags: this.resultOffsets ? RowsFlags.ResultView : RowsFlags.None,
-    });
+    return this.rows.fetchRows(this.index, range, this.resultSet);
   }
 
   // ---------------------------------------------------------------- query
@@ -549,9 +518,7 @@ export class Session {
     if (!offsets) {
       return 0;
     }
-    const parser = createRecordParser(this.schema);
     const names = this.columnNames;
-    const recordLength = this.schema.recordLength ?? 0;
     const handle = await fs.open(target.fsPath, 'w');
 
     try {
@@ -564,26 +531,21 @@ export class Session {
         if (token.isCancellationRequested) {
           break;
         }
-        const offset = offsets[i] ?? 0;
-        const bytes = await this.file.read(offset, recordLength > 0 ? recordLength : 64 * 1024);
-        const span = walkRecords(bytes, offset, offset, 1, this.lineEnding, recordLength, true)[0];
-        if (!span) {
+        const cells = await this.rows.readRecordCells(offsets[i] ?? 0);
+        if (!cells) {
           continue;
         }
-        parser.parse(bytes, span.start - offset, span.end - offset);
 
         if (format === 'csv') {
-          const values: string[] = [];
-          for (let column = 0; column < parser.columnCount; column++) {
-            values.push(csvEscape(parser.text(column)));
-          }
-          buffer += `${values.join(',')}\n`;
+          buffer += `${cells.map(csvEscape).join(',')}
+`;
         } else {
           const record: Record<string, string> = {};
-          for (let column = 0; column < parser.columnCount; column++) {
-            record[names[column] ?? `col${column + 1}`] = parser.text(column);
+          for (let column = 0; column < cells.length; column++) {
+            record[names[column] ?? `col${column + 1}`] = cells[column] ?? '';
           }
-          buffer += `${JSON.stringify(record)}\n`;
+          buffer += `${JSON.stringify(record)}
+`;
         }
 
         // Flush in fixed-size batches rather than accumulating the whole export.

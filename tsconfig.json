@@ -1,7 +1,9 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "lib": ["ES2022"],
+    "lib": [
+      "ES2022"
+    ],
     "module": "Node16",
     "moduleResolution": "Node16",
     "rootDir": "src",
@@ -17,8 +19,22 @@
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
     "sourceMap": true,
-    "types": ["node", "vscode"]
+    "types": [
+      "node",
+      "vscode"
+    ]
   },
-  "include": ["src/extension/**/*.ts", "src/workers/**/*.ts", "src/core/**/*.ts", "src/shared/**/*.ts"],
-  "exclude": ["src/webview", "node_modules", "dist", "out"]
+  "include": [
+    "src/extension/**/*.ts",
+    "src/workers/**/*.ts",
+    "src/core/**/*.ts",
+    "src/shared/**/*.ts",
+    "src/probe/**/*.ts"
+  ],
+  "exclude": [
+    "src/webview",
+    "node_modules",
+    "dist",
+    "out"
+  ]
 }

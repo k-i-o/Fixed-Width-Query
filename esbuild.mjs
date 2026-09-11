@@ -6,6 +6,7 @@ import * as esbuild from 'esbuild';
 
 const production = process.argv.includes('--production');
 const watch = process.argv.includes('--watch');
+const probe = process.argv.includes('--probe');
 
 /** @type {import('esbuild').BuildOptions} */
 const common = {
@@ -49,7 +50,20 @@ const cssConfig = {
   loader: { '.css': 'copy' },
 };
 
-const configs = [hostConfig, webviewConfig, cssConfig];
+/**
+ * The performance probe. Built into tmp/ rather than dist/ so it never ships inside the
+ * .vsix, and only when asked for.
+ */
+const probeConfig = {
+  ...common,
+  entryPoints: { probe: 'src/probe/perfProbe.ts' },
+  outdir: 'tmp',
+  platform: 'node',
+  format: 'cjs',
+  minify: false,
+};
+
+const configs = probe ? [probeConfig] : [hostConfig, webviewConfig, cssConfig];
 
 if (watch) {
   const contexts = await Promise.all(configs.map((c) => esbuild.context(c)));

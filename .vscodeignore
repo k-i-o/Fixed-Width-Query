@@ -5,9 +5,15 @@ scripts/**
 docs/**
 tmp/**
 node_modules/**
-.eslintrc.json
+.eslintrc.cjs
 esbuild.mjs
 tsconfig.json
 **/tsconfig.json
 *.map
 .gitignore
+media/icon.svg
+.github/**
+*.vsix
+.claude/**
+CLAUDE.md
+

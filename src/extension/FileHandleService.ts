@@ -56,6 +56,16 @@ export class FileHandleService {
     return this.cachedBytes;
   }
 
+  /** Diagnostics for the performance probe: what the cache actually holds. */
+  get cacheStats(): { pages: number; trackedBytes: number; backingBytes: number } {
+    let backingBytes = 0;
+    for (const page of this.pages.values()) {
+      // What the cache *costs* is the backing ArrayBuffer, not the view's length.
+      backingBytes += page.bytes.buffer.byteLength;
+    }
+    return { pages: this.pages.size, trackedBytes: this.cachedBytes, backingBytes };
+  }
+
   /** Detect external modification. Serving rows from a stale index corrupts what the user sees. */
   async hasChangedOnDisk(): Promise<boolean> {
     try {

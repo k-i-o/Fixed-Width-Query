@@ -55,6 +55,8 @@ export type ToHost =
   | { readonly type: 'clearResult' }
   | { readonly type: 'cancel'; readonly gen: number }
   | { readonly type: 'saveSchema' }
+  | { readonly type: 'saveSchemaAs' }
+  | { readonly type: 'loadSchema' }
   | { readonly type: 'exportResult' }
   | { readonly type: 'log'; readonly message: string };
 
@@ -78,6 +80,8 @@ export type ToWebview =
     }
   | { readonly type: 'queryPlan'; readonly gen: number; readonly description: string; readonly columns: readonly string[] }
   | { readonly type: 'resultCleared' }
+  /** Which profile the current schema came from, or null if it was inferred. */
+  | { readonly type: 'profile'; readonly path: string | null }
   | { readonly type: 'focusQueryBar' }
   | { readonly type: 'toggleRuler' }
   | { readonly type: 'goToRow'; readonly row: number }

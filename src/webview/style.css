@@ -16,6 +16,21 @@
   box-sizing: border-box;
 }
 
+/*
+ * The `hidden` attribute must actually hide things.
+ *
+ * The browser's default [hidden] { display: none } is a UA rule, so ANY author rule that
+ * sets display wins over it — including a plain `.error-banner { display: flex }`. The
+ * result is an element that is hidden in the markup, hidden in the logic, and visible on
+ * screen. Three elements here were permanently displayed because of exactly that.
+ *
+ * !important is load-bearing rather than lazy: the whole point is to outrank every layout
+ * rule that would otherwise resurrect a hidden element.
+ */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   height: 100%;
@@ -273,6 +288,13 @@ button:disabled {
   will-change: transform;
 }
 
+.grid-header,
+.grid-filters,
+.grid-row {
+  /* Cells are absolutely positioned against these. */
+  position: relative;
+}
+
 .grid-row {
   position: relative;
   height: var(--fwq-row-height);
@@ -327,6 +349,41 @@ button:disabled {
   font-family: var(--vscode-font-family);
   font-weight: 600;
   border-right: 1px solid var(--vscode-panel-border);
+  user-select: none;
+}
+
+/*
+ * Column resize handle: a grab strip straddling the column's trailing edge.
+ * Wider than the 1px border it sits on, because a 1px hit target is unusable.
+ */
+.col-resize {
+  position: absolute;
+  top: 0;
+  right: -4px;
+  z-index: 3;
+  height: 100%;
+  cursor: col-resize;
+  /* Never inherits the header's ellipsis or padding. */
+  padding: 0;
+  background: transparent;
+}
+
+.col-resize:hover::after,
+body.resizing-column .col-resize:active::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 3px;
+  width: 2px;
+  height: 100%;
+  background: var(--vscode-focusBorder);
+}
+
+/* While dragging, the col-resize cursor must win everywhere, not just over the handle. */
+body.resizing-column,
+body.resizing-column * {
+  cursor: col-resize !important;
+  user-select: none;
 }
 
 .header-gutter {
@@ -340,19 +397,34 @@ button:disabled {
   padding: 0 2px;
 }
 
+/*
+ * Operator and value share the column's width instead of the operator being pinned.
+ *
+ * `flex: 1 1 0` and not `1 1 auto`: a select's automatic basis is the width of its WIDEST
+ * option, so "matches regular expression" would size the closed control and swallow the
+ * whole cell. A zero basis makes the split purely proportional, and the clamps keep the
+ * operator readable when the column is narrow and stop it hogging space when it is wide.
+ */
 .filter-op {
-  flex: 0 0 auto;
-  width: 62px;
+  flex: 1 1 0;
+  min-width: 56px;
+  max-width: 140px;
   padding: 1px 2px;
   font-size: 0.85em;
+  text-overflow: ellipsis;
 }
 
 .filter-value {
-  flex: 1 1 auto;
-  min-width: 0;
+  flex: 1 1 0;
+  min-width: 48px;
   padding: 1px 4px;
   font-size: 0.85em;
   font-family: var(--vscode-editor-font-family);
+}
+
+.filter-value:not(:placeholder-shown) {
+  /* An active filter should be visible at a glance in a row of 200 boxes. */
+  outline: 1px solid var(--vscode-focusBorder);
 }
 
 /* ------------------------------------------------------------------ errors */

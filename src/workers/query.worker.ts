@@ -86,7 +86,14 @@ class TopN {
   }
 }
 
-/** Growable Float64 buffer; doubling beats pushing onto a JS array of millions of numbers. */
+/**
+ * Growable Float64 buffer, and the single place a result lives.
+ *
+ * An earlier version also pushed every match onto a parallel JS array so the final message
+ * could be built from it. That doubled the memory of every query for no benefit: this
+ * buffer already holds the complete result, and a progressive batch is just the window
+ * added since the last flush.
+ */
 class OffsetBuffer {
   private data = new Float64Array(4096);
   private count = 0;
@@ -104,10 +111,9 @@ class OffsetBuffer {
     return this.count;
   }
 
-  takeAll(): Float64Array {
-    const result = this.data.slice(0, this.count);
-    this.count = 0;
-    return result;
+  /** Copy of [from, to) — the copy is required, since it gets transferred away. */
+  slice(from: number, to: number): Float64Array {
+    return this.data.slice(Math.max(0, from), Math.min(this.count, to));
   }
 }
 
@@ -136,8 +142,8 @@ async function run(): Promise<void> {
 
   const matchOffsets = new OffsetBuffer();
   const matchRows = new OffsetBuffer();
-  const allOffsets: number[] = [];
-  const allRows: number[] = [];
+  /** How much of the result has already been sent as a progressive batch. */
+  let flushedCount = 0;
 
   let rowIndex = 0;
   let matched = 0;
@@ -161,12 +167,13 @@ async function run(): Promise<void> {
 
     // Partial batches are suppressed for sorted queries: showing rows that the final sort
     // will reorder is worse than showing a progress count.
-    if (ordering || matchOffsets.length === 0) {
+    if (ordering || matchOffsets.length === flushedCount) {
       post({ type: 'progress', scannedBytes: carryStart - request.dataStart, matched });
       return;
     }
-    const offsets = matchOffsets.takeAll();
-    const rowIndices = matchRows.takeAll();
+    const offsets = matchOffsets.slice(flushedCount, matchOffsets.length);
+    const rowIndices = matchRows.slice(flushedCount, matchRows.length);
+    flushedCount = matchOffsets.length;
     post(
       { type: 'batch', offsets, rowIndices, scannedBytes: carryStart - request.dataStart, matched },
       [offsets.buffer, rowIndices.buffer],
@@ -230,8 +237,6 @@ async function run(): Promise<void> {
           } else {
             matchOffsets.push(span.start);
             matchRows.push(currentRow);
-            allOffsets.push(span.start);
-            allRows.push(currentRow);
             if (matched >= request.maxResults) {
               truncated = true;
               break;
@@ -276,8 +281,8 @@ async function run(): Promise<void> {
           const key = orderIsNumeric ? parser.number(orderColumn) : parser.text(orderColumn);
           ordering.offer(Number.isNaN(key as number) ? Number.POSITIVE_INFINITY : key, span.start, currentRow);
         } else {
-          allOffsets.push(span.start);
-          allRows.push(currentRow);
+          matchOffsets.push(span.start);
+          matchRows.push(currentRow);
         }
       }
       carryStart += carry.length;
@@ -305,9 +310,9 @@ async function run(): Promise<void> {
 
     // Unsorted: LIMIT/OFFSET slice the match list in scan order.
     const start = compiled.offset;
-    const end = compiled.limit === null ? allOffsets.length : Math.min(allOffsets.length, start + compiled.limit);
-    const finalOffsets = Float64Array.from(allOffsets.slice(start, end));
-    const finalRows = Float64Array.from(allRows.slice(start, end));
+    const end = compiled.limit === null ? matchOffsets.length : Math.min(matchOffsets.length, start + compiled.limit);
+    const finalOffsets = matchOffsets.slice(start, end);
+    const finalRows = matchRows.slice(start, end);
 
     post(
       {

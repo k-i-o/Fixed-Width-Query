@@ -77,7 +77,7 @@ comes with an explicit revision of this document.
 
 | ID | Constraint | Target | How it is measured |
 |---|---|---|---|
-| **P1** | Extension resident memory | **< 200 MB RSS**, constant and independent of file size: 1 GB and 50 GB must show the same profile | `process.memoryUsage().rss` sampled over a 10-minute scroll scenario |
+| **P1** | Extension resident memory | **< 200 MB RSS**, constant and independent of file size: 1 GB and 50 GB must show the same profile. ⚠️ Met for browsing; **not met for large result sets** — see §3.2 | Settled RSS after a forced GC, per phase, via `npm run perf` |
 | **P2** | Viewport chunk latency | **< 1 s** at p99, with p50 under 120 ms | Timestamp from request to render commit, via `performance.mark` |
 | **P3** | Time-to-first-row | **< 500 ms** from open, regardless of file size | From `openCustomDocument` to the first painted row |
 | **P4** | Indexing throughput | **≥ 300 MB/s** per core on NVMe SSD; the index is incremental and does **not** block navigation | Bytes scanned over elapsed time, isolated worker |
@@ -94,13 +94,46 @@ Every component gets a **hard** ceiling, not a guideline:
 | Component | Budget | Strategy |
 |---|---|---|
 | Sparse row index | ≤ 8 MB | `Float64Array`, checkpoint every 4096 rows — exact to 2^53, no BigInt cost in scan loops ([ADR-001](adr/ADR-001-editor-api-and-virtualizer.md)) |
-| Raw byte page cache | ≤ 64 MB | LRU over 1 MB pages, deterministic eviction |
+| Raw byte page cache | ≤ 32 MB | LRU over 1 MB pages, deterministic eviction. Lowered from 64 MB after measurement: 64 MB broke the total budget and bought under 0.2 ms of p99 row latency |
 | Decoded rows (viewport plus overscan) | ≤ 16 MB | Roughly 3× the viewport; nothing is retained beyond that |
 | Query results | ≤ 32 MB | Only **byte offsets and row ids** are materialized (`Float64Array`), never rows |
 | Runtime, workers, webview | ≤ 80 MB | Bounded pool, worker heaps capped via `resourceLimits` |
 
 **Architectural invariant**: *no data structure may grow proportionally to file size, except the
 sparse index, which grows at a 1/4096 factor and is capped regardless.*
+
+### 3.2 Open finding — P1 holds for browsing, not for large results
+
+Measured 2026-09-11 via `npm run perf -- --gb 0.5` (shipped defaults, 32 MB page cache):
+
+| Phase | Settled RSS | Verdict |
+|---|---|---|
+| Open plus first rows | 57 MB | fine |
+| Indexing complete | 64 MB | fine |
+| 400 random 256-row fetches | 133 MB | fine, and **flat as file size grows** |
+| Query returning 1.65M matches | 300 MB | **over budget** |
+
+P1 as written is about file size, and on that axis it holds: browsing a 500 MB file and a
+50 GB file cost the same, because nothing in the read path scales with the file. What the SLO
+never accounted for is a second axis — **result-set size**. A query matching 1.65M rows adds
+roughly 167 MB, about 100 bytes per match against a nominal payload of 16 bytes (one offset
+plus one row index).
+
+The overhead is spread across: the worker's growable buffers carrying up to 2x doubling
+headroom, the transferred copy the host retains, the per-batch progressive copies, and V8 heap
+growth in the worker isolate that the allocator does not return to the OS after termination.
+
+Three ways forward, in increasing order of effort:
+
+1. **Lower `maxQueryResults`** from 2,000,000 to ~500,000. Caps the cost at roughly 50 MB and
+   needs no code change; the trade is that large result sets report truncation sooner.
+2. **Spill offsets past a threshold** to a temp file, keeping only a window in memory. Keeps
+   unbounded results working at flat memory; costs real complexity in the result reader.
+3. **Re-scope P1** to "flat in file size, with result sets budgeted separately at N bytes per
+   match", and state the per-match figure honestly in the README.
+
+This is a product decision, not purely a technical one, and is deliberately left open rather
+than silently resolved. It must be closed before publishing.
 
 ---
 
